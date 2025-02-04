@@ -1,0 +1,805 @@
+---
+title: "COVID"
+author: Anna L Tyler
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output: 
+  html_document:
+    code_folding: hide
+    collapsed: no
+    toc: yes
+    toc_float: yes
+---
+
+
+This goal of this project is to map variants involved
+in COVID mortality.
+
+
+```{r fun}
+rm(list = ls())
+
+library(here)
+all.fun <- list.files(here("Code"), full.names = TRUE, pattern = ".R")
+for(i in 1:length(all.fun)){source(all.fun[i])}
+
+all.packages <- c("pheatmap", "qtl2", "cluster")
+load_libraries(all.packages)
+
+weight.covar <- TRUE #if set to TRUE, initial weight is used as a covariate
+
+if(weight.covar){
+  adjust.text <- "we adjusted for initial body weight."
+  file.text <- "weight_adjusted"
+}else{
+  adjust.text <- "we did not adjust for initial body weight."
+  file.text <- "weight_unadjusted"
+}
+
+n.pc <- 4
+```
+
+In this run, `r adjust.text`
+But it actually has a very minimal effect overall.
+
+```{r load_data, warning = FALSE, messag = FALSE, error = FALSE}
+qtl2.dir <- here("Data", "COVID_mappingdataforQTL2")
+pheno <- as.matrix(read.csv(file.path(qtl2.dir, "COVID_pheno.csv")))
+covar <- as.matrix(read.csv(file.path(qtl2.dir, "COVID_covar.csv")))
+mouse.id <- pheno[,1]
+num.covar <- dummy_covar(covar[,2:3])
+rownames(num.covar) <- mouse.id
+
+#there were some issues with the mapping data I downloaded.
+#Here I address these in a new folder
+#stop()
+covid <- read_cross2(here("Data", "qtl2_data", "COVID.yaml"))
+
+map <- insert_pseudomarkers(covid$gmap, step=1)
+
+# calculate genotype probabilities
+genoprobs <- calc_genoprob(covid, map, error_prob=0.002)
+
+kin <- calc_kinship(genoprobs, type = "loco")
+```
+
+```{r name_variables}
+sex <- as.numeric(as.factor(covar[,"Sex"]))
+survival <- as.numeric(pheno[,"Survival"])
+names(sex) <- names(survival) <- mouse.id
+```
+
+The heat map below shows body weight with body weight = 0
+after death for better clustering. The color code shows
+survival. There are two animals marked as survivors that
+I don't think actually were.
+
+```{r weight, fig.width = 10, fig.height = 5}
+daily.weight.idx <- c(grep("AM", colnames(pheno)), grep("PM", colnames(pheno)))
+weight.mat <- pheno[,daily.weight.idx]
+weight.mat <- apply(weight.mat, 2, as.numeric)
+
+#one male has 0s instead of NAs. Make sure everyone
+#has the same way of showing death
+weight.mat[which(weight.mat == 0)] <- NA
+
+split.col <- strsplit(colnames(weight.mat), ".", fixed = TRUE)
+day.num <- as.numeric(sapply(split.col, function(x) x[2]))
+am.pm <- sapply(split.col, function(x) x[3])
+weight.time <- cbind(day.num, am.pm)
+ordered.table <- sort.by.then.by(weight.time, 
+  col.type = c("n", "c"), return.order = TRUE)
+weight.order <- ordered.table[,1][ordered.table[,2]]
+ordered.weight.label <- apply(weight.time[weight.order,], 1, 
+  function(x) paste(x, collapse = "_"))
+
+ordered.weight <- weight.mat[,weight.order]
+rownames(ordered.weight) <- rownames(ordered.weight) <- mouse.id
+colnames(ordered.weight) <- colnames(ordered.weight) <- ordered.weight.label
+
+na.idx <- which(is.na(ordered.weight)) #keep track of NA position
+
+adj.weight <- adjust(ordered.weight, num.covar)
+
+survival.df <- data.frame("Survival" = as.factor(pheno[,"Survival"]))
+rownames(survival.df) <- mouse.id
+
+weight.with.zero <- ordered.weight
+weight.with.zero[na.idx] <- 0
+
+pheatmap(t(weight.with.zero), cluster_rows = FALSE, 
+  cluster_cols = TRUE, annotation_col = survival.df)
+
+final.weight <- weight.with.zero[,weight.order[length(weight.order)]]
+final.zero <- which(final.weight == 0)
+wrong.label <- intersect(final.zero, which(survival == 1))
+if(length(wrong.label) > 0){
+  wrong.id <- pheno[wrong.label,1]
+}
+```
+
+The animals with mislabeled survival are the following: 
+`r paste(wrong.id, collapse = ", ")`
+
+For now we are assigning these mice to a survival value of 0.
+
+The animals cluster into two groups. Those that died quickly,
+and those that survived much longer, or until the end of the 
+experiment. 
+
+
+```{r survival_swap, fig.width = 10, fig.height = 5}
+survival[wrong.label] <- 0
+survival.df <- data.frame("Survival" = as.factor(survival))
+
+pheatmap(t(weight.with.zero), cluster_rows = FALSE, 
+  cluster_cols = TRUE, annotation_col = survival.df)
+```
+
+Is there any interaction between survival and sex?
+Males had a better chance of surviving, but the difference
+was not significant at the 0.05 level using a Fisher exact 
+test.
+
+```{r sex_int, fig.width = 5, fig.height = 5}
+counts <- table(data.frame("survival" = survival, "sex" = sex))
+colnames(counts) <- c("F", "M")
+rownames(counts) <- c("Died", "Survived")
+ftest <- fisher.test(counts)
+pvalue <- ftest$p.value
+#barplot(counts, beside = TRUE, legend = TRUE, main = paste0("p = ", signif(pvalue, 2)))
+survival.rate <- apply(counts, 1, function(x) x/sum(x))
+barplot_with_num(signif(survival.rate[,"Survived"], 2), 
+  ylab = "Proportion Survived", text.gap = 0.3, text.shift = 0.2,
+  main = paste("p =", signif(pvalue, 2)))
+```
+
+Was there a relationship between initial weight and 
+survivorship? On average, animals with higher initial
+body weight have better survival. We could use initial
+weight as a covariate to avoid mapping loci associated
+with higher initial body weight.
+
+```{r weight_advantage}
+model <- lm(weight.mat[,1]~survival)
+model.p <- summary(model)$coefficients["survival","Pr(>|t|)"]
+boxplot(weight.mat[,1]~survival, ylab = "Initial Body Weight", 
+  names = c("Died", "Survived"), main = paste("p =", signif(model.p, 2)))
+```
+
+As shown below, higher initial weight helped females survive,
+but did not make a difference to males.
+
+```{r weight_and_sex, width = 8, height = 4}
+par(mfrow = c(1,2))
+f.idx <- which(sex == 1)
+model <- lm(weight.mat[f.idx,1]~survival[f.idx])
+model.p <- summary(model)$coefficients["survival[f.idx]","Pr(>|t|)"]
+
+boxplot(weight.mat[f.idx,1]~survival[f.idx], names = c("Died", "Survived"), 
+  ylab = "Initial Body Weight", xlab = "",
+  main = paste("Females\np =", signif(model.p, 2)))
+
+
+m.idx <- which(sex == 2)
+model <- lm(weight.mat[m.idx,1]~survival[m.idx])
+model.p <- summary(model)$coefficients["survival[m.idx]","Pr(>|t|)"]
+
+boxplot(weight.mat[m.idx,1]~survival[m.idx], names = c("Died", "Survived"), 
+  ylab = "Initial Body Weight", xlab = "",
+  main = paste("Males\np =", signif(model.p, 2)))
+```
+
+
+These animals cluster into two clear groups in the decomposition
+of the weight matrix. They are a mix of males and females
+
+```{r, fig.width = 10, fig.height = 5}
+par(mfrow = c(1,2))
+survivor.decomp <- plot.decomp(weight.with.zero, cols = as.numeric(pheno[,"Survival"])+1, 
+  main = "Colored by Survival", pc = n.pc)
+plot.decomp(weight.with.zero, cols = sex, main = "Colored by Sex", pc = n.pc)
+survivor.pc <- survivor.decomp$u
+rownames(survivor.pc) <- mouse.id
+colnames(survivor.pc) <- paste0("PC", 1:n.pc)
+```
+
+## Survivorship {.tabset .tabset-fade .tabset-pills}
+
+We mapped survivorship as well as the first two principal components
+of the weight matrix.
+
+The first PC of the weight matrix is essentially the same as 
+the binary survivorship value, but the LOD score on Chr 9 is
+a bit higher, so we gained something by using a numeric score.
+
+```{r scan_fun}
+scan_survival <- function(pheno.mat, geno, addcovar, intcovar = NULL, K, num_perm = 1000){
+  reg_scan <- scan1(geno, pheno.mat, addcovar = addcovar, intcovar = intcovar, kinship = K)
+  chr_len <- chr_lengths(covid$gmap)
+  scan_perm <- scan1perm(geno, pheno = pheno.mat, addcovar = addcovar, 
+    perm_Xsp = TRUE, chr_lengths = chr_len, n_perm = num_perm)
+  result  <- list("scan1_result" = reg_scan, "perm_result" = scan_perm)
+  return(result)
+}
+
+plot_survival_scan <- function(scan_result, int_scan_result = NULL, 
+  alpha = c(0.05, 0.1), quote.level = "####", x.thresh = 0.95,
+  label.cex = 0.5){
+  
+  the_scan <- scan_result$scan1_result
+  the_perm <- scan_result$perm_result
+
+  if(!is.null(int_scan_result)){
+    int_scan <- int_scan_result[[1]]
+    int_scan_perm <- int_scan_result[[2]]
+  }
+
+  sig.level <- summary(the_perm, alpha = alpha)
+
+  if(!is.null(int_scan_result)){
+    sig.int.level <- summary(int_scan_perm, alpha = alpha)
+    max.lod <- max(c(apply(the_scan, 2, max), max(unlist(sig.level)), max(unlist(sig.int.level))))*1.1
+  }else{
+    max.lod <- max(c(apply(the_scan, 2, max), max(unlist(sig.level))))*1.1
+  }
+
+  #pdf("~/Desktop/survivor_clusters.pdf", width = 10, height = 5)
+  for(i in 1:ncol(the_scan)){
+    cat(quote.level, colnames(the_scan)[i], "\n")
+    par(xpd = NA, mar = c(4, 4, 4, 5))
+    plot(the_scan, map = map, lodcol = i, 
+      main = colnames(the_scan)[i],
+      ylim = c(0, max.lod))
+    plot.dim <- par("usr")
+    if(!is.null(int_scan_result)){
+      plot(int_scan, map = map, lodcol = i,
+        main = colnames(int_scan)[i], col = "red", add = TRUE)
+      segments(x0 = plot.dim[1], x1 = plot.dim[2]*x.thresh, y0 = sig.int.level[[1]][,i], 
+        lty = c(1,2), col = "red")
+      text(plot.dim[2], sig.int.level[[1]][,i], labels = paste("Int", alpha), adj = 0,
+        cex = label.cex)
+      segments(x0 = plot.dim[2]*x.thresh, x1 = plot.dim[2], y0 = sig.int.level[[2]][,i], 
+        lty = c(1,2), col = "red")
+      text(plot.dim[2], sig.int.level[[2]][,i], labels = paste("Int", alpha), adj = 0,
+        cex = label.cex)
+    }
+    segments(x0 = plot.dim[1], x1 = plot.dim[2]*x.thresh, y0 = sig.level[[1]][,i], 
+      lty = c(1,2), col = "darkblue")
+    text(plot.dim[2], sig.level[[1]][,i], labels = paste("Add", alpha), adj = 0,
+        cex = label.cex)
+
+    segments(x0 = plot.dim[2]*x.thresh, x1 = plot.dim[2], y0 = sig.level[[2]][,i], 
+      lty = c(1,2), col = "darkblue")
+    text(plot.dim[2], sig.level[[2]][,i], labels = paste("Add", alpha), adj = 0,
+        cex = label.cex)
+    cat("\n\n")
+  }
+  par(xpd = TRUE)
+}
+```
+
+```{r map survivor, results = "asis", fig.width = 10, fig.height = 5}
+
+if(weight.covar){
+  num.covar <- cbind(num.covar, weight.mat[,1,drop=FALSE])
+}
+survivor.mat <- cbind(survival, survivor.pc)
+
+survival.scan.file <- here("Results", paste0("survival_scan_", file.text, ".RDS"))
+if(!file.exists(survival.scan.file)){
+  survival_scan <- scan_survival(pheno.mat = survivor.mat, geno = genoprobs, 
+    addcovar = num.covar, K = kin, num_perm = 100)
+  saveRDS(survival_scan, survival.scan.file)
+}else{
+  survival_scan <- readRDS(survival.scan.file)  
+}
+
+#pdf("~/Desktop/survivor_clusters.pdf", width = 10, height = 5)
+plot_survival_scan(survival_scan, quote.level = "###")
+#dev.off()
+```
+
+```{r survivor_sex_int, eval = FALSE}
+
+survivor.int.scan.file <- here("Results", paste0("survivor_int_scan_", file.text, ".RDS"))
+if(!file.exists(survivor.int.scan.file)){
+  survivor_int_scan <- scan_survival(pheno.mat = survivor.mat, geno = genoprobs, 
+    addcovar = num.covar, intcovar = num.covar[,"Sex_M",drop=FALSE],
+    K = kin, num_perm = 100)
+  saveRDS(survivor_int_scan, survivor.int.scan.file)
+}else{
+  survivor_int_scan <- readRDS(survivor.int.scan.file)  
+}
+
+#pdf("~/Desktop/survivor_int_clusters.pdf", width = 10, height = 5)
+plot_survival_scan(scan_result = survival_scan, int_scan_result = survivor_int_scan)
+#dev.off()
+
+```
+
+
+## Survivor Clusters
+
+We looked at whether there were different ways to survive.
+It might be that there are multiple things going on that
+are difficult to map in the full group.
+
+The plots below show the weight of just the mice that
+survived. They all have fairly steady weights. There is 
+an initial dip, particularly in the females, but then
+a recovery period.
+
+```{r sex_weight}
+f.idx <- which(sex == 1)
+m.idx <- which(sex == 2)
+
+f.weight <- ordered.weight[f.idx,]
+m.weight <- ordered.weight[m.idx,]
+
+ymax <- max(weight.mat, na.rm = TRUE)
+
+par(mfrow = c(1,2))
+
+plot.new()
+plot.window(xlim = c(0, ncol(ordered.weight)), ylim = c(0, ymax))
+for(i in 1:length(f.idx)){
+  not.na <- which(!is.na(f.weight[i,]))
+  points(x = not.na, y = f.weight[i,not.na], col = "#2b8cbe", type = "b",
+    pch = 16, cex = 0.7)
+}
+axis(1, at = 1:length(ordered.weight.label), labels = ordered.weight.label, las = 2)
+axis(2)
+mtext("Females", side = 3, line = 1.5)
+
+plot.new()
+plot.window(xlim = c(0, ncol(ordered.weight)), ylim = c(0, ymax))
+for(i in 1:length(m.idx)){
+  not.na <- which(!is.na(m.weight[i,]))
+  points(x = not.na, y = m.weight[i,not.na], col = "#31a354", type = "b",
+  pch = 16, cex = 0.7)
+}
+axis(1, at = 1:length(ordered.weight.label), labels = ordered.weight.label, las = 2)
+axis(2)
+mtext("Males", side = 3, line = 1.5)
+```
+
+We clustered the survivors to see if there were multiple
+weight trajectories. This can maybe help identify
+more subtle genetic effects than simply looking at 
+survival.
+
+To do this, we looked at body weights relative to the
+initial body weight.
+
+```{r survivors}
+survivor.idx <- which(survival == 1)
+dier.idx <- which(survival == 0)
+f.survivor.idx <- intersect(f.idx, survivor.idx)
+m.survivor.idx <- intersect(m.idx, survivor.idx)
+f.dier.idx <- intersect(f.idx, dier.idx)
+m.dier.idx <- intersect(m.idx, dier.idx)
+
+#center the weight on initial weight
+cent.weight <- t(apply(ordered.weight, 1, function(x) x - x[1]))
+```
+
+
+```{r cluster_fun}
+
+cluster_mat <- function(mat, k = 4, cluster.by = c("pam", "cutree"),
+  use.cov.mat = FALSE, plot.results = TRUE){
+  
+  cluster.by <- cluster.by[1]
+
+  na.idx <- which(is.na(mat))
+  if(length(na.idx) > 0){
+    use.cov.mat <- TRUE #use covariance matrix automatically if there are any NAs
+  }
+
+  if(use.cov.mat){
+    #use pairwise complete covariance
+    cov.mat <- cov(t(mat), use = "pairwise.complete.obs")
+    no.na.mat <- cov.mat
+
+  }else{
+    no.na.mat <- mat
+  }
+
+  if(cluster.by == "pam"){
+    mat.groups <- pam(no.na.mat, k = k)$clustering
+  }
+  if(cluster.by == "cutree"){
+    mat.groups <- cutree(hclust(dist(no.na.mat)), k = k)
+  }
+
+  group.df <- data.frame("group" = as.factor(mat.groups))
+  group.order <- order(mat.groups)
+
+  #pheatmap(mat[group.order,], cluster_cols = FALSE, cluster_rows = FALSE, annotation_row = group.df)
+
+  if(plot.results){
+    layout.mat <- get.layout.mat(k)
+    layout(layout.mat)
+    for(cl in 1:k){
+      plot.new()
+      plot.window(xlim = c(0, ncol(mat)), 
+        ylim = c(min(mat, na.rm = TRUE), max(mat, na.rm = TRUE)))
+      cl.idx <- which(mat.groups == cl)
+      for(i in 1:length(cl.idx)){
+        points(mat[cl.idx[i],], type = "b")
+      }
+      abline(h = 0)
+      mtext(paste("Cluster", cl), side = 3, line = 1.5)
+      axis(1); axis(2)
+    }
+  }
+  result <- list("Clusters" = mat.groups)
+  return(result)
+}
+
+pheatmap_with_nas <- function(mat, annot_row_df = NULL){
+  if(!is.null(annot_row_df)){
+    row.order <- order(annot_row_df[,1])
+    pheatmap(mat[row.order,], cluster_rows = FALSE, 
+      cluster_cols = FALSE, annotation_row = annot_row_df)
+  }else{
+    no.na.mat <- mat
+    for(i in 1:nrow(no.na.mat)){
+      na.idx <- which(is.na(no.na.mat[i,]))
+      last.value <- no.na.mat[i,(min(na.idx)-1)]
+      no.na.mat[i,na.idx] <- last.value
+    }
+    #na.idx <- which(is.na(mat))
+    #no.na.mat[na.idx] <- 0
+    pheatmap(mat[row.order,], cluster_rows = FALSE, cluster_cols = FALSE)
+  }
+}
+
+decomp_with_nas <- function(mat, pc = 2, cols = NULL){  
+  cov.mat <- cov(t(mat), use = "pairwise.complete.obs")
+  no.na.mat <- cov.mat
+  no.na.decomp <- plot.decomp(no.na.mat, cols = cols, pc = pc)
+  invisible(no.na.decomp)
+}
+```
+
+### Females 
+
+The plots below show the females grouped by body 
+weight trajectory anchored on their initial body 
+weight. It looks as if the animals cluster into 
+four classes. 
+
+1. Lost weight and never regained it
+2. Lost weight and regained it
+3. Lost a small amount of weight gradually
+4. Gained weight
+
+```{r f_groups, fig.width = 7, fig.height = 7}
+k = 4
+#pheatmap(ref.weight[f.survivor.idx,])
+f.groups <- cluster_mat(mat = cent.weight[f.survivor.idx,], 
+  cluster.by = "pam", k = k)
+```
+
+The heat map below shows the weights of these
+groups annotated by the clusters above.
+
+```{r f_group_heat, fig.width = 9, fig.height = 5}
+cluster_order <- order(f.groups[[1]])
+pheatmap(cent.weight[f.survivor.idx[cluster_order],], cluster_rows = FALSE,
+  cluster_cols = FALSE, 
+  annotation_row = data.frame("Cluster" = as.factor(f.groups[[1]])))
+```
+
+The plot below shows the decomposition of the weight matrix
+clustered by group. The first two PCs of the matrix
+separate the individuals pretty well into their groups.
+
+```{r f_group_decomp, fig.width = 5, fig.height = 5}
+f.decomp <- plot.decomp(cent.weight[f.survivor.idx,], cols = f.groups[[1]], pc = n.pc)
+legend("topleft", pch = 16, col = 1:k, legend = paste("Cluster", 1:k))
+f.pc <- f.decomp$u
+rownames(f.pc) <- mouse.id[f.survivor.idx]
+colnames(f.pc) <- paste0("PC", 1:n.pc)
+```
+
+### Mapping Female Survivor Groups {.tabset .tabset-fade .tabset-pills}
+
+There was one significant QTL on the X chromosome for cluster
+ for clusters, although 
+there was a locus on Chr 10 for cluster 1 that got close.
+We used batch as an additive covariate, and a LOCO kinship
+correction.
+
+```{r cluster_pheno}
+#generates a dummy phenotype matrix for clustered weight matrices.
+#each cluster gets a binary phenotype where animals are either in
+#the cluster or not
+
+cluster_pheno <- function(cluster.id){
+  dummy.mat <- matrix(0, nrow = nrow(cluster.id), ncol = max(cluster.id))
+  for(i in 1:max(cluster.id)){
+    dummy.mat[which(cluster.id[,1] == i),i] <- 1
+  }
+  colnames(dummy.mat) <- paste("Cluster", 1:ncol(dummy.mat))
+  rownames(dummy.mat) <- rownames(cluster.id)
+  return(dummy.mat)
+}
+```
+
+
+```{r map_f_clusters, fig.width = 10, fig.height = 5, results = "asis"}
+f.clust <- matrix(f.groups$Clusters, ncol = 1)
+rownames(f.clust)  <- mouse.id[f.survivor.idx]
+f_clusters <- cluster_pheno(f.clust)
+f_clusters <- cbind(f_clusters, f.pc)
+
+f.survivor.file <- here("Results", paste0("survivor_scan_f_", file.text, ".RDS"))
+if(!file.exists(f.survivor.file)){
+  f_survivor_scan <- scan_survival(pheno.mat = f_clusters, geno = genoprobs, 
+    addcovar = num.covar, K = kin, num_perm = 100)
+  saveRDS(f_survivor_scan, f.survivor.file)
+}else{
+  f_survivor_scan <- readRDS(f.survivor.file)  
+}
+
+#pdf("~/Desktop/female_survivor_clusters.pdf", width = 10, height = 5)
+plot_survival_scan(f_survivor_scan, quote.level = "####")
+#dev.off()
+
+```
+
+### Males
+
+We did the same with the males. The also clustered
+into four groups.
+
+1. Gained weight
+2. Lost a little weight and regained it.
+3. Lost a lot of weight and didn't quite regain it.
+4. Lost weight steadily.
+
+```{r m_groups, fig.width = 7, fig.height = 7}
+#pheatmap(ref.weight[m.survivor.idx,])
+k = 4
+m.groups <- cluster_mat(cent.weight[m.survivor.idx,], 
+  cluster.by = "pam", k = k)
+cluster_order <- order(m.groups[[1]])
+```
+
+The heat map below annotates these groups.
+
+```{r m_group_heat, fig.width = 9, fig.height = 5}
+pheatmap(cent.weight[m.survivor.idx[cluster_order],], cluster_rows = FALSE,
+  cluster_cols = FALSE, 
+  annotation_row = data.frame("Cluster" = as.factor(m.groups[[1]])))
+```
+
+The plot below shows that the first PCs of the weight matrix
+nicely separate these clusters.
+
+```{r m_group_decomp, fig.width = 5, fig.width = 5}
+m.decomp <- plot.decomp(cent.weight[m.survivor.idx,], cols = m.groups[[1]], pc = n.pc)
+legend("topleft", pch = 16, col = 1:k, legend = paste("Cluster", 1:k))
+m.pc <- m.decomp$u
+rownames(m.pc) <- mouse.id[m.survivor.idx]
+colnames(m.pc) <- paste0("PC", 1:n.pc)
+```
+
+### Mapping Male Survivor Groups {.tabset .tabset-fade .tabset-pills}
+
+Below we show the results for mapping the clusters just in 
+the male animals. We used batch as an additive covariate,
+and a LOCO kinship correction.
+
+There were multiple significant QTL in this group. 
+Clusters 1, 3, and 4 had significant QTL on chromosomes
+2, proximal 18, and distal 18 respectively. The first PC
+of the weight matrix also had a weakly significant QTL
+on Chr 8. 
+
+
+```{r map_m_clusters, fig.width = 10, fig.height = 5, results = "asis"}
+m.clust <- matrix(m.groups$Clusters, ncol = 1)
+rownames(m.clust) <- mouse.id[m.survivor.idx]
+m_clusters <- cluster_pheno(m.clust)
+m_clusters <- cbind(m_clusters, m.pc)
+
+
+m.survivor.file <- here("Results", paste0("survivor_scan_m_", file.text, ".RDS"))
+if(!file.exists(m.survivor.file)){
+  m_survivor_scan <- scan_survival(pheno.mat = m_clusters, geno = genoprobs, 
+    addcovar = num.covar, K = kin, num_perm = 100)
+  saveRDS(m_survivor_scan, m.survivor.file)
+}else{
+  m_survivor_scan <- readRDS(m.survivor.file)  
+}
+
+#pdf("~/Desktop/male_survivor_clusters.pdf", width = 10, height = 5)
+plot_survival_scan(m_survivor_scan, quote.level = "####")
+#dev.off()
+
+```
+
+
+### All survivors
+
+We also looked at a sex-adjusted matrix of all surviving animals.
+These also clustered into four groups
+
+Here we see three groups:
+1. Didn't lose weight
+2. Lost weight and almost got back to original weight
+3. Lost weight and did not regain it
+4. Gradually lost weight
+
+```{r full_group, fig.width = 8, fig.height = 8}
+k = 4
+adj.cent <- t(apply(adj.weight, 1, function(x) x-x[1]))
+#pheatmap(adj.cent[survivor.idx,], cluster_cols = FALSE)
+adj.groups <- cluster_mat(adj.cent[survivor.idx,], 
+  cluster.by = "pam", k = k)
+cluster_order <- order(adj.groups[[1]])
+```
+
+The heat map below shows the annotated clusters.
+
+```{r all_heat, fig.width = 9, fig.height = 5}
+pheatmap(adj.cent[survivor.idx[cluster_order],], cluster_rows = FALSE,
+  cluster_cols = FALSE, 
+  annotation_row = data.frame("Cluster" = as.factor(adj.groups[[1]])))
+```
+
+The plot below shows that the clusters separate mainly 
+along the first PC.
+
+```{r full_decomp, fig.width = 5, fig.height = 5}
+survivor.decomp <- full.decomp <- plot.decomp(adj.cent[survivor.idx,], cols = adj.groups[[1]], n.pc)
+legend("topleft", pch = 16, col = 1:k, legend = paste("Cluster", 1:k))
+survivor.pc <- survivor.decomp$u
+rownames(survivor.pc) <- mouse.id[survivor.idx]
+colnames(survivor.pc) <- paste0("PC", 1:n.pc)
+```
+
+### Mapping All Survivors {.tabset .tabset-fade .tabset-pills}
+
+The plots below show the mapping results for all survivor 
+clusters. Cluster 2 had an weakly significant peak on Chr 5,
+but none of the other clusters or PCs had any significant 
+peaks. We used sex and batch as additive covariates, and 
+a LOCO kinship correction.
+
+```{r, map_all_survivors, fig.width = 10, fig.height = 5, results = "asis"}
+survivor.pheno <- cluster_pheno(as.matrix(adj.groups[[1]], ncol = 1))
+survivor.pheno <- cbind(survivor.pheno, survivor.pc)
+
+survivor.file <- here("Results", paste0("survivor_scan_", file.text, ".RDS"))
+if(!file.exists(survivor.file)){
+  survivor_scan <- scan_survival(pheno.mat = survivor.pheno, geno = genoprobs, 
+    addcovar = num.covar, K = kin, num_perm = 100)
+  saveRDS(survivor_scan, survivor.file)
+}else{
+  survivor_scan <- readRDS(survivor.file)  
+}
+
+#pdf("~/Desktop/all_survivor_clusters.pdf", width = 10, height = 5)
+plot_survival_scan(survivor_scan, quote.level = "####")
+#dev.off()
+
+```
+
+
+## Dier Clusters
+
+It's much harder to cluster the diers. They don't have
+as much data. But I'd say there are three distinct 
+patterns. We can't really see these until we break the
+animals into many groups.
+
+1. Rapid weight loss followed by death
+2. Very little weight loss followed by death
+3. Rapid weight loss, followed by gradual weight loss, and a later death
+
+```{r dier_f}
+dier.ref.weight <- t(apply(ordered.weight[dier.idx,], 1, function(x) x - x[1]))
+
+#pheatmap_with_nas(dier.ref.weight)
+
+k = 8
+dier.groups <- cluster_mat(mat = dier.ref.weight, 
+  cluster.by = "cutree", k = k)
+
+cluster_order <- order(dier.groups[[1]])
+```
+
+The heat map below annotates these groups.
+
+```{r dier_heat, fig.width = 9, fig.height = 5}
+cl_df <- data.frame(as.factor(dier.groups[[1]]))
+colnames(cl_df) <- "Cluster"
+pheatmap_with_nas(dier.ref.weight, annot_row_df = cl_df)
+```
+
+The plot below shows that the first PCs of the weight matrix
+nicely separate these clusters.
+
+```{r dier_decomp, fig.width = 5, fig.width = 5}
+dier.decomp <- decomp_with_nas(dier.ref.weight, cols = dier.groups[[1]], pc = n.pc)
+legend("bottomright", pch = 16, col = 1:k, legend = paste("Cluster", 1:k))
+dier.pc <- dier.decomp$u
+rownames(dier.pc) <- mouse.id[dier.idx]
+colnames(dier.pc) <- paste0("PC", 1:n.pc)
+```
+
+### Mapping Diers {.tabset .tabset-fade .tabset-pills}
+
+Cluster 3 had a weakly significant QTL on Chr 4. We used
+sex and batch as additive covariates, and a LOCO kinship 
+correction.
+
+```{r map_dier, fig.width = 10, fig.height = 5, results = "asis"}
+dier_pheno <- cluster_pheno(matrix(dier.groups[[1]], ncol = 1))
+dier_pheno <- cbind(dier_pheno, dier.pc)
+
+dier.file <- here("Results", paste0("dier_scan_", file.text, ".RDS"))
+if(!file.exists(dier.file)){
+  dier_scan <- scan_survival(pheno.mat = dier_pheno, geno = genoprobs, 
+    addcovar = num.covar, K = kin, num_perm = 100)
+  saveRDS(dier_scan, dier.file)
+}else{
+  dier_scan <- readRDS(dier.file)  
+}
+
+#pdf("~/Desktop/dier_clusters.pdf", width = 10, height = 5)
+plot_survival_scan(scan_result = dier_scan, quote.level = "####")
+#dev.off()
+```
+
+
+```{r pheno, eval = FALSE}
+pheno.group <- matrix(NA, nrow = nrow(pheno), ncol = 1)
+rownames(pheno.group) <- pheno[,1]
+pheno.group[names(adj.groups[[1]]),] <- adj.groups[[1]]
+pheno.group[names(dier.groups[[1]]),] <- dier.groups[[1]]+max(adj.groups[[1]])
+dummy.pheno <- cluster_pheno(cluster.id = pheno.group)
+all.dummy <- cbind(pheno[,1], survival, dummy.pheno)
+colnames(all.dummy)[1:2] <- c("Mouse", "Survival")
+write.table(all.dummy, here("Data", "qtl2_data", "COVID_pheno.csv"), 
+  quote = FALSE, sep = ",", row.names = FALSE)
+
+gmap <- read.csv(here("Data", "qtl2_data", "COVID_pmap.csv"))
+chr14.idx <- which(gmap[,"chr"] == 14)
+chr14.table <- gmap[chr14.idx,]
+sorted.chr14 <- sort.by.then.by(chr14.table, c(2,3), c("n", "n"))
+#plot(chr14.table[,"pos"], sorted.chr14[,"pos"])
+
+gmap[chr14.idx,] <- sorted.chr14
+write.table(gmap, here("Data", "qtl2_data", "COVID_gmap.csv"),
+  quote = FALSE, sep = ",", row.names = FALSE)
+```
+
+
+
+## CAPE
+
+```{r load_cape}
+load_latest_cape(here("../../git_repositories/cape"))
+```
+
+```{r cape}
+covid.cape <- qtl2_to_cape(covid)
+data_obj <- covid.cape$data_obj
+data_obj$pheno <- cbind(survivor.mat, num.covar)
+geno_obj <- covid.cape$geno_obj
+
+results_dir <- here("Results", "cape_survivorship")
+final_obj <- run_cape(pheno_obj = data_obj, geno_obj, 
+    param_file = file.path(results_dir, "0_covid.parameters_0.yml"),
+    verbose = FALSE, results_path = results_dir)
+```
+
+```{r sandbox, eval = FALSE}
+plot_effects(final_obj, geno_obj, marker1 = "gJAX00705519_B", 
+  marker2 = "S3C055110997_B", error = "se", plot_type = "b")
+```
