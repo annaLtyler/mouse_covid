@@ -25,7 +25,7 @@ for(i in 1:length(all.fun)){source(all.fun[i])}
 all.packages <- c("pheatmap", "qtl2", "cluster")
 load_libraries(all.packages)
 
-weight.covar <- TRUE #if set to TRUE, initial weight is used as a covariate
+weight.covar <- FALSE #if set to TRUE, initial weight is used as a covariate
 
 if(weight.covar){
   adjust.text <- "we adjusted for initial body weight."
@@ -35,7 +35,7 @@ if(weight.covar){
   file.text <- "weight_unadjusted"
 }
 
-n.pc <- 4
+n.pc <- 2 #number of PCs to use when decomposing weight matrices
 ```
 
 In this run, `r adjust.text`
@@ -205,12 +205,14 @@ colnames(survivor.pc) <- paste0("PC", 1:n.pc)
 
 ## Survivorship {.tabset .tabset-fade .tabset-pills}
 
-We mapped survivorship as well as the first two principal components
-of the weight matrix.
+We mapped a few basic phenotypes to start:
 
-The first PC of the weight matrix is essentially the same as 
-the binary survivorship value, but the LOD score on Chr 9 is
-a bit higher, so we gained something by using a numeric score.
+  1. Survivorship (whether an animal lived through the expeirment or not)
+  2. The first two principal components of the weight matrix
+  3. Time survived
+  4. Difference in weight between the first time point and last time point
+  5. Maximum weight lossed (even if some weight was regained)
+
 
 ```{r scan_fun}
 scan_survival <- function(pheno.mat, geno, addcovar, intcovar = NULL, K, num_perm = 1000){
@@ -239,8 +241,10 @@ plot_survival_scan <- function(scan_result, int_scan_result = NULL,
   if(!is.null(int_scan_result)){
     sig.int.level <- summary(int_scan_perm, alpha = alpha)
     max.lod <- max(c(apply(the_scan, 2, max), max(unlist(sig.level)), max(unlist(sig.int.level))))*1.1
+    min.lod <- min(c(apply(the_scan, 2, min), min(unlist(sig.level)), min(unlist(sig.int.level))))
   }else{
     max.lod <- max(c(apply(the_scan, 2, max), max(unlist(sig.level))))*1.1
+    min.lod <- min(c(apply(the_scan, 2, min), min(unlist(sig.level))))
   }
 
   #pdf("~/Desktop/survivor_clusters.pdf", width = 10, height = 5)
@@ -249,7 +253,7 @@ plot_survival_scan <- function(scan_result, int_scan_result = NULL,
     par(xpd = NA, mar = c(4, 4, 4, 5))
     plot(the_scan, map = map, lodcol = i, 
       main = colnames(the_scan)[i],
-      ylim = c(0, max.lod))
+      ylim = c(min.lod, max.lod))
     plot.dim <- par("usr")
     if(!is.null(int_scan_result)){
       plot(int_scan, map = map, lodcol = i,
@@ -283,18 +287,26 @@ plot_survival_scan <- function(scan_result, int_scan_result = NULL,
 if(weight.covar){
   num.covar <- cbind(num.covar, weight.mat[,1,drop=FALSE])
 }
-survivor.mat <- cbind(survival, survivor.pc)
+
+time.survived <- apply(weight.mat, 1, function(x) max(which(!is.na(x))))
+initial.weight <- weight.mat[,1]
+final.weight <- sapply(1:nrow(weight.mat), function(x) weight.mat[x,time.survived[x]])
+weight.loss.overall <- final.weight - initial.weight
+min.weight <- apply(weight.mat, 1, function(x) min(x, na.rm = TRUE))
+max.weight.lossed <- min.weight - initial.weight
+
+survival.mat <- cbind(survival, survivor.pc, time.survived, weight.loss.overall, max.weight.lossed)
 
 survival.scan.file <- here("Results", paste0("survival_scan_", file.text, ".RDS"))
 if(!file.exists(survival.scan.file)){
-  survival_scan <- scan_survival(pheno.mat = survivor.mat, geno = genoprobs, 
+  survival_scan <- scan_survival(pheno.mat = survival.mat, geno = genoprobs, 
     addcovar = num.covar, K = kin, num_perm = 100)
   saveRDS(survival_scan, survival.scan.file)
 }else{
   survival_scan <- readRDS(survival.scan.file)  
 }
 
-#pdf("~/Desktop/survivor_clusters.pdf", width = 10, height = 5)
+#pdf("~/Desktop/survival_pheno.pdf", width = 10, height = 5)
 plot_survival_scan(survival_scan, quote.level = "###")
 #dev.off()
 ```
@@ -383,85 +395,6 @@ m.dier.idx <- intersect(m.idx, dier.idx)
 cent.weight <- t(apply(ordered.weight, 1, function(x) x - x[1]))
 ```
 
-
-```{r cluster_fun}
-
-cluster_mat <- function(mat, k = 4, cluster.by = c("pam", "cutree"),
-  use.cov.mat = FALSE, plot.results = TRUE){
-  
-  cluster.by <- cluster.by[1]
-
-  na.idx <- which(is.na(mat))
-  if(length(na.idx) > 0){
-    use.cov.mat <- TRUE #use covariance matrix automatically if there are any NAs
-  }
-
-  if(use.cov.mat){
-    #use pairwise complete covariance
-    cov.mat <- cov(t(mat), use = "pairwise.complete.obs")
-    no.na.mat <- cov.mat
-
-  }else{
-    no.na.mat <- mat
-  }
-
-  if(cluster.by == "pam"){
-    mat.groups <- pam(no.na.mat, k = k)$clustering
-  }
-  if(cluster.by == "cutree"){
-    mat.groups <- cutree(hclust(dist(no.na.mat)), k = k)
-  }
-
-  group.df <- data.frame("group" = as.factor(mat.groups))
-  group.order <- order(mat.groups)
-
-  #pheatmap(mat[group.order,], cluster_cols = FALSE, cluster_rows = FALSE, annotation_row = group.df)
-
-  if(plot.results){
-    layout.mat <- get.layout.mat(k)
-    layout(layout.mat)
-    for(cl in 1:k){
-      plot.new()
-      plot.window(xlim = c(0, ncol(mat)), 
-        ylim = c(min(mat, na.rm = TRUE), max(mat, na.rm = TRUE)))
-      cl.idx <- which(mat.groups == cl)
-      for(i in 1:length(cl.idx)){
-        points(mat[cl.idx[i],], type = "b")
-      }
-      abline(h = 0)
-      mtext(paste("Cluster", cl), side = 3, line = 1.5)
-      axis(1); axis(2)
-    }
-  }
-  result <- list("Clusters" = mat.groups)
-  return(result)
-}
-
-pheatmap_with_nas <- function(mat, annot_row_df = NULL){
-  if(!is.null(annot_row_df)){
-    row.order <- order(annot_row_df[,1])
-    pheatmap(mat[row.order,], cluster_rows = FALSE, 
-      cluster_cols = FALSE, annotation_row = annot_row_df)
-  }else{
-    no.na.mat <- mat
-    for(i in 1:nrow(no.na.mat)){
-      na.idx <- which(is.na(no.na.mat[i,]))
-      last.value <- no.na.mat[i,(min(na.idx)-1)]
-      no.na.mat[i,na.idx] <- last.value
-    }
-    #na.idx <- which(is.na(mat))
-    #no.na.mat[na.idx] <- 0
-    pheatmap(mat[row.order,], cluster_rows = FALSE, cluster_cols = FALSE)
-  }
-}
-
-decomp_with_nas <- function(mat, pc = 2, cols = NULL){  
-  cov.mat <- cov(t(mat), use = "pairwise.complete.obs")
-  no.na.mat <- cov.mat
-  no.na.decomp <- plot.decomp(no.na.mat, cols = cols, pc = pc)
-  invisible(no.na.decomp)
-}
-```
 
 ### Females 
 
@@ -692,67 +625,210 @@ plot_survival_scan(survivor_scan, quote.level = "####")
 
 ## Dier Clusters
 
-It's much harder to cluster the diers. They don't have
+It's harder to cluster the diers because they don't have
 as much data. But I'd say there are three distinct 
 patterns. We can't really see these until we break the
 animals into many groups.
+
+### Female Diers
+
+The females split well into three groups.
 
 1. Rapid weight loss followed by death
 2. Very little weight loss followed by death
 3. Rapid weight loss, followed by gradual weight loss, and a later death
 
-```{r dier_f}
-dier.ref.weight <- t(apply(ordered.weight[dier.idx,], 1, function(x) x - x[1]))
+```{r dier_f, fig.width = 9, fig.height = 3}
 
-#pheatmap_with_nas(dier.ref.weight)
+f.dier.ref.weight <- t(apply(ordered.weight[f.dier.idx,], 1, function(x) x - x[1]))
 
-k = 8
-dier.groups <- cluster_mat(mat = dier.ref.weight, 
+#pheatmap_with_nas(f.dier.ref.weight)
+
+k = 3
+f.dier.groups <- cluster_mat(mat = f.dier.ref.weight, 
   cluster.by = "cutree", k = k)
 
-cluster_order <- order(dier.groups[[1]])
+f.cluster_order <- order(f.dier.groups[[1]])
 ```
 
 The heat map below annotates these groups.
 
-```{r dier_heat, fig.width = 9, fig.height = 5}
-cl_df <- data.frame(as.factor(dier.groups[[1]]))
-colnames(cl_df) <- "Cluster"
-pheatmap_with_nas(dier.ref.weight, annot_row_df = cl_df)
+```{r f.dier_heat, fig.width = 9, fig.height = 5}
+f.cl_df <- data.frame(as.factor(f.dier.groups[[1]]))
+colnames(f.cl_df) <- "Cluster"
+pheatmap_with_nas(f.dier.ref.weight, annot_row_df = f.cl_df)
 ```
 
 The plot below shows that the first PCs of the weight matrix
 nicely separate these clusters.
 
 ```{r dier_decomp, fig.width = 5, fig.width = 5}
-dier.decomp <- decomp_with_nas(dier.ref.weight, cols = dier.groups[[1]], pc = n.pc)
+f.dier.decomp <- decomp_with_nas(f.dier.ref.weight, cols = f.dier.groups[[1]], pc = n.pc)
 legend("bottomright", pch = 16, col = 1:k, legend = paste("Cluster", 1:k))
-dier.pc <- dier.decomp$u
-rownames(dier.pc) <- mouse.id[dier.idx]
-colnames(dier.pc) <- paste0("PC", 1:n.pc)
+f.dier.pc <- f.dier.decomp$u
+rownames(f.dier.pc) <- mouse.id[f.dier.idx]
+colnames(f.dier.pc) <- paste0("PC", 1:n.pc)
 ```
 
-### Mapping Diers {.tabset .tabset-fade .tabset-pills}
-
-Cluster 3 had a weakly significant QTL on Chr 4. We used
-sex and batch as additive covariates, and a LOCO kinship 
-correction.
+### Mapping Female Diers {.tabset .tabset-fade .tabset-pills}
 
 ```{r map_dier, fig.width = 10, fig.height = 5, results = "asis"}
-dier_pheno <- cluster_pheno(matrix(dier.groups[[1]], ncol = 1))
-dier_pheno <- cbind(dier_pheno, dier.pc)
+f.dier_pheno <- cluster_pheno(matrix(f.dier.groups[[1]], ncol = 1))
+f.dier_pheno <- cbind(f.dier_pheno, f.dier.pc)
 
-dier.file <- here("Results", paste0("dier_scan_", file.text, ".RDS"))
-if(!file.exists(dier.file)){
-  dier_scan <- scan_survival(pheno.mat = dier_pheno, geno = genoprobs, 
-    addcovar = num.covar, K = kin, num_perm = 100)
-  saveRDS(dier_scan, dier.file)
+f.dier.file <- here("Results", paste0("dier_scan_female_", file.text, ".RDS"))
+if(!file.exists(f.dier.file)){
+  #the kinship correction does totally weird things here, so I'm leaving it out.
+  f.dier_scan <- scan_survival(pheno.mat = f.dier_pheno, geno = genoprobs, 
+    addcovar = num.covar, K = NULL, num_perm = 100)
+  saveRDS(f.dier_scan, f.dier.file)
 }else{
-  dier_scan <- readRDS(dier.file)  
+  f.dier_scan <- readRDS(f.dier.file)  
 }
 
-#pdf("~/Desktop/dier_clusters.pdf", width = 10, height = 5)
-plot_survival_scan(scan_result = dier_scan, quote.level = "####")
+#pdf("~/Desktop/female_dier_clusters.pdf", width = 10, height = 5)
+plot_survival_scan(scan_result = f.dier_scan, quote.level = "####")
+#dev.off()
+```
+
+### Male Diers
+
+I think the best split for the males is probably two groups.
+
+1. Rapid weight loss followed by death
+2. Less weight loss followed by death
+
+```{r dier_m, fig.width = 6, fig.height = 3}
+
+m.dier.ref.weight <- t(apply(ordered.weight[m.dier.idx,], 1, function(x) x - x[1]))
+
+#pheatmap_with_nas(m.dier.ref.weight)
+
+k = 2
+m.dier.groups <- cluster_mat(mat = m.dier.ref.weight, 
+  cluster.by = "cutree", k = k)
+
+m.cluster_order <- order(m.dier.groups[[1]])
+```
+
+The heat map below annotates these groups.
+
+```{r m.dier_heat, fig.width = 9, fig.height = 5}
+m.cl_df <- data.frame(as.factor(m.dier.groups[[1]]))
+colnames(m.cl_df) <- "Cluster"
+pheatmap_with_nas(m.dier.ref.weight, annot_row_df = m.cl_df)
+```
+
+The plot below shows that the first PCs of the weight matrix
+nicely separate these clusters.
+
+```{r m.dier_decomp, fig.width = 5, fig.width = 5}
+m.dier.decomp <- decomp_with_nas(m.dier.ref.weight, cols = m.dier.groups[[1]], pc = n.pc)
+legend("bottomright", pch = 16, col = 1:k, legend = paste("Cluster", 1:k))
+m.dier.pc <- m.dier.decomp$u
+rownames(m.dier.pc) <- mouse.id[m.dier.idx]
+colnames(m.dier.pc) <- paste0("PC", 1:n.pc)
+```
+
+### Mapping Male Diers {.tabset .tabset-fade .tabset-pills}
+
+```{r map_dier.m, fig.width = 10, fig.height = 5, results = "asis"}
+m.dier_pheno <- cluster_pheno(matrix(m.dier.groups[[1]], ncol = 1))
+m.dier_pheno <- cbind(m.dier_pheno, m.dier.pc)
+
+m.dier.file <- here("Results", paste0("dier_scan_male_", file.text, ".RDS"))
+if(!file.exists(m.dier.file)){
+  #the kinship correction does totally weird things here, so I'm leaving it out.
+  m.dier_scan <- scan_survival(pheno.mat = m.dier_pheno, geno = genoprobs, 
+    addcovar = num.covar, K = NULL, num_perm = 100)
+  saveRDS(m.dier_scan, m.dier.file)
+}else{
+  m.dier_scan <- readRDS(m.dier.file)  
+}
+
+#pdf("~/Desktop/male_dier_clusters.pdf", width = 10, height = 5)
+plot_survival_scan(scan_result = m.dier_scan, quote.level = "####")
+#dev.off()
+```
+
+### All Diers
+
+I've tried multiple ways of clustering all the diers,
+but it's quite tricky. There are a lot of individual
+ways to die, so it's hard to cluster everyone. 
+by clustering them into three groups, we have groups
+that lost a little, some, and not much weight before
+dying, but a range of times to death. 
+
+
+```{r dier_all, fig.width = 9, fig.height = 3}
+
+all.dier.ref.weight <- t(apply(ordered.weight[dier.idx,], 1, function(x) x - x[1]))
+#time.survived <- apply(all.dier.ref.weight, 1, function(x) max(which(!is.na(x))))
+#weight.lossed <- sapply(1:nrow(all.dier.ref.weight), function(x) all.dier.ref.weight[x,time.survived[x]])
+#test.decomp <- plot.decomp(cbind(time.survived, weight.lossed), plot.results = FALSE)
+#test.groups <- test.pam.k(cbind(time.survived, weight.lossed), kseq = 2:5)
+#k = as.numeric(names(which.max(sapply(test.groups[[1]], mean))))
+#k = 2
+#all.dier.groups <- pam(cbind(time.survived, weight.lossed), k = k)$clustering
+#pheatmap_with_nas(all.dier.ref.weight)
+#layout(get.layout.mat(k))
+#for(i in 1:k){
+#  plot.new()
+#  plot.window(xlim = c(1, ncol(all.dier.ref.weight)), 
+#    ylim = c(min(all.dier.ref.weight, na.rm = TRUE), max(all.dier.ref.weight, na.rm = TRUE)))
+#  axis(1)
+#  axis(2)
+#  cl.idx <- which(all.dier.groups == i)
+#  for(j in 1:length(cl.idx)){
+#    points(all.dier.ref.weight[cl.idx[j],], type = "b")
+#  }
+#}
+
+k = 3
+all.dier.groups <- cluster_mat(mat = all.dier.ref.weight, 
+  cluster.by = "cutree", k = k)
+
+all.cluster_order <- order(all.dier.groups$Clusters)
+```
+
+The heat map below annotates these groups.
+
+```{r all.dier_heat, fig.width = 9, fig.height = 5}
+all.cl_df <- data.frame(as.factor(all.dier.groups$Cluster))
+colnames(all.cl_df) <- "Cluster"
+pheatmap_with_nas(all.dier.ref.weight, annot_row_df = all.cl_df)
+```
+
+The plot below shows that the first PCs of the weight matrix
+nicely separate these clusters.
+
+```{r all.dier_decomp, fig.width = 5, fig.width = 5}
+all.dier.decomp <- decomp_with_nas(all.dier.ref.weight, cols = all.dier.groups[[1]], pc = n.pc)
+legend("bottomright", pch = 16, col = 1:k, legend = paste("Cluster", 1:k))
+all.dier.pc <- all.dier.decomp$u
+rownames(all.dier.pc) <- mouse.id[dier.idx]
+colnames(all.dier.pc) <- paste0("PC", 1:n.pc)
+```
+
+### Mapping All Diers {.tabset .tabset-fade .tabset-pills}
+
+```{r map_dier.all, fig.width = 10, fig.height = 5, results = "asis"}
+all.dier_pheno <- cluster_pheno(matrix(all.dier.groups[[1]], ncol = 1))
+all.dier_pheno <- cbind(all.dier_pheno, all.dier.pc)
+
+all.dier.file <- here("Results", paste0("dier_scan_all_", file.text, ".RDS"))
+if(!file.exists(all.dier.file)){
+  #the kinship correction does totally weird things here, so I'm leaving it out.
+  all.dier_scan <- scan_survival(pheno.mat = all.dier_pheno, geno = genoprobs, 
+    addcovar = num.covar, K = NULL, num_perm = 100)
+  saveRDS(all.dier_scan, all.dier.file)
+}else{
+  all.dier_scan <- readRDS(all.dier.file)  
+}
+
+#pdf("~/Desktop/all_dier_clusters.pdf", width = 10, height = 5)
+plot_survival_scan(scan_result = all.dier_scan, quote.level = "####")
 #dev.off()
 ```
 
@@ -787,7 +863,7 @@ write.table(gmap, here("Data", "qtl2_data", "COVID_gmap.csv"),
 load_latest_cape(here("../../git_repositories/cape"))
 ```
 
-```{r cape}
+```{r cape, eval = FALSE}
 covid.cape <- qtl2_to_cape(covid)
 data_obj <- covid.cape$data_obj
 data_obj$pheno <- cbind(survivor.mat, num.covar)
