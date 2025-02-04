@@ -803,3 +803,4 @@ final_obj <- run_cape(pheno_obj = data_obj, geno_obj,
 plot_effects(final_obj, geno_obj, marker1 = "gJAX00705519_B", 
   marker2 = "S3C055110997_B", error = "se", plot_type = "b")
 ```
+
