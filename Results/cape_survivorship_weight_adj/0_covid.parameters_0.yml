@@ -1,0 +1,62 @@
+#================================================
+# General Parameters 
+#================================================
+traits:
+ - PC1
+ - PC2
+covariates:
+ - Sex_M
+ - Batch_2
+ - Day.1.AM.Weight
+scan_what:
+ - raw_traits
+traits_scaled:
+ - false
+traits_normalized:
+ - false
+eig_which:
+ - 1
+ - 2
+pval_correction:
+ - fdr 
+use_kinship:
+ - false
+pop:
+ - 2PP
+save_results:
+ - true
+use_saved_results:
+ - true
+transform_to_phenospace:
+ - false
+
+#================================================
+# Single Scan Parameters 
+#================================================
+ref_allele:
+ - A 
+singlescan_perm:
+ - 0
+alpha:
+ - 0.05
+ - 0.01
+
+#================================================
+# Marker Selection Parameters 
+#================================================
+marker_selection_method:
+ - top_effects
+peak_density:
+ - 0.5 
+tolerance:
+ - 5 
+num_alleles_in_pairscan:
+ - 100
+#================================================
+# Pairscan Parameters 
+#================================================
+max_pair_cor:
+ - 0.5 
+pairscan_null_size:
+ - 1500
+
