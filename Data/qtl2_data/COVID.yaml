@@ -1,0 +1,25 @@
+# COVID Data from (B6 x CAST)xCAST N2 Backcross
+# Collaboration with Trudeau Institute
+# Munger 2-9-2024
+#
+crosstype: bc
+geno: COVID_geno.csv
+pheno: COVID_pheno.csv
+covar: COVID_covar.csv
+gmap: COVID_gmap.csv
+pmap: COVID_pmap.csv
+alleles:
+- C
+- B
+genotypes:
+  CC: 1
+  BC: 2
+  BB: 3
+sex:
+  covar: Sex
+  F: female
+  M: male
+x_chr: X
+na.strings:
+- '-'
+- NA
